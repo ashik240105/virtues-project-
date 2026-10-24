@@ -96,6 +96,9 @@ export function PatientsPage({ onSelectRecord }) {
       const res = await api.getPatientHistory(pt.id);
       if (res.success && res.data) {
         setEncounters(res.data.encounters || []);
+        if (res.data.patient) {
+          setSelectedPatient((prev) => ({ ...prev, ...res.data.patient }));
+        }
       }
     } catch (err) {
       setError("Failed to load patient encounter history.");
@@ -321,7 +324,7 @@ export function PatientsPage({ onSelectRecord }) {
                             </span>
                           </div>
                           <div className="text-xs text-slate-500 mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
-                            <span>DOB: <strong className="text-slate-700">{pt.date_of_birth}</strong></span>
+                            <span>DOB: <strong className="text-slate-700">{pt.date_of_birth || pt.dob}</strong></span>
                             <span>Gender: {pt.gender}</span>
                             {pt.phone && <span>Tel: {pt.phone}</span>}
                           </div>
@@ -376,7 +379,7 @@ export function PatientsPage({ onSelectRecord }) {
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-3 text-xs">
                   <div>
                     <span className="text-slate-400 block">Date of Birth</span>
-                    <span className="font-semibold text-slate-800">{selectedPatient.date_of_birth}</span>
+                    <span className="font-semibold text-slate-800">{selectedPatient.date_of_birth || selectedPatient.dob}</span>
                   </div>
                   <div>
                     <span className="text-slate-400 block">Gender</span>

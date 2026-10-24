@@ -42,6 +42,11 @@ export const api = {
   },
 
   // Speech Transcription
+  async getTranscriptionLanguages() {
+    const res = await fetch(`${API_BASE}/api/transcription/languages`);
+    return handleResponse(res);
+  },
+
   async transcribeAudio(formData) {
     const res = await fetch(`${API_BASE}/api/transcription/transcribe`, {
       method: "POST",
@@ -99,6 +104,15 @@ export const api = {
     return handleResponse(res);
   },
 
+  async syncRecords(syncPayload) {
+    const res = await fetch(`${API_BASE}/api/records/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(syncPayload)
+    });
+    return handleResponse(res);
+  },
+
   async exportJson(recordId, version = null) {
     const url = `${API_BASE}/api/records/${encodeURIComponent(recordId)}/export/json${version ? `?version=${version}` : ""}`;
     const res = await fetch(url);
@@ -107,6 +121,23 @@ export const api = {
 
   getPdfUrl(recordId, version = null) {
     return `${API_BASE}/api/records/${encodeURIComponent(recordId)}/export/pdf${version ? `?version=${version}` : ""}`;
+  },
+
+  // Feature 5: Hospital Handover Document
+  async getHandover(recordId, version = null) {
+    const url = `${API_BASE}/api/records/${encodeURIComponent(recordId)}/handover${version ? `?version=${version}` : ""}`;
+    const res = await fetch(url);
+    return handleResponse(res);
+  },
+
+  getHandoverPdfUrl(recordId, version = null) {
+    return `${API_BASE}/api/records/${encodeURIComponent(recordId)}/handover/pdf${version ? `?version=${version}` : ""}`;
+  },
+
+  // Ongoing Case Timeline & Vitals Chart
+  async getTimeline(recordId) {
+    const res = await fetch(`${API_BASE}/api/records/${encodeURIComponent(recordId)}/timeline`);
+    return handleResponse(res);
   },
 
   getAudioUrl(filename) {
@@ -145,6 +176,45 @@ export const api = {
 
   async getMedicineCatalogue() {
     const res = await fetch(`${API_BASE}/api/medicines/catalogue`);
+    return handleResponse(res);
+  },
+
+  async addFormularyEntry(entryData) {
+    const res = await fetch(`${API_BASE}/api/medicines/catalogue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(entryData)
+    });
+    return handleResponse(res);
+  },
+
+  // Feature 3: Unknown Medication Reviews
+  async getUnknownMedications(recordId) {
+    const res = await fetch(`${API_BASE}/api/records/${encodeURIComponent(recordId)}/unknown-medications`);
+    return handleResponse(res);
+  },
+
+  async resolveUnknownMedication(recordId, itemId, resolutionData) {
+    const res = await fetch(`${API_BASE}/api/records/${encodeURIComponent(recordId)}/unknown-medications/${encodeURIComponent(itemId)}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(resolutionData)
+    });
+    return handleResponse(res);
+  },
+
+  // Feature 4: Allergy & Medication Safety Warnings
+  async getAllergyWarnings(recordId) {
+    const res = await fetch(`${API_BASE}/api/records/${encodeURIComponent(recordId)}/allergy-warnings`);
+    return handleResponse(res);
+  },
+
+  async acknowledgeAllergyWarning(recordId, warningId, ackData) {
+    const res = await fetch(`${API_BASE}/api/records/${encodeURIComponent(recordId)}/allergy-warnings/${encodeURIComponent(warningId)}/acknowledge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(ackData)
+    });
     return handleResponse(res);
   },
 

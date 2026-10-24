@@ -9,6 +9,7 @@ import { RecordDetailsPage } from "./pages/RecordDetailsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { PatientsPage } from "./pages/PatientsPage";
 import { AccuracyTrustPage } from "./pages/AccuracyTrustPage";
+import { HospitalHandoverPage } from "./pages/HospitalHandoverPage";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState("dashboard");
@@ -23,6 +24,8 @@ export default function App() {
       setActiveTab("details");
     } else if (view === "timeline") {
       setActiveTab("timeline");
+    } else if (view === "handover") {
+      setActiveTab("handover");
     }
   };
 
@@ -59,6 +62,14 @@ export default function App() {
             recordId={selectedRecordId}
             onBack={() => setActiveTab("records")}
             onNavigateTimeline={(id) => handleSelectRecord(id, "timeline")}
+            onNavigateHandover={(id) => handleSelectRecord(id, "handover")}
+          />
+        )}
+
+        {activeTab === "handover" && (
+          <HospitalHandoverPage
+            recordId={selectedRecordId}
+            onBack={() => setActiveTab("review")}
           />
         )}
 

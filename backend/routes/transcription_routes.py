@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
-from backend.services.transcription_service import TranscriptionService, AUDIO_DIR
+from backend.services.transcription_service import TranscriptionService, MissingModelError, AUDIO_DIR
 
 transcription_bp = Blueprint("transcription", __name__)
 
@@ -70,11 +70,15 @@ def transcribe_audio():
                 "error": f"Audio file exceeds maximum allowed size of 30MB (received {file_size} bytes)."
             }), 413
 
+        # Language selection (default: en)
+        requested_lang = request.form.get("language") or request.args.get("language") or "en"
+        requested_lang = requested_lang.lower().strip()
+
         # Transcribe locally
         service = TranscriptionService.get_instance()
         transcription_result = service.transcribe_audio_file(
             audio_filepath=saved_filepath,
-            language="en"
+            language=requested_lang
         )
 
         return jsonify({
@@ -82,6 +86,8 @@ def transcribe_audio():
             "data": {
                 "transcript": transcription_result["transcript"],
                 "language": transcription_result["language"],
+                "source_language": transcription_result.get("source_language", requested_lang),
+                "detected_language": transcription_result.get("detected_language", transcription_result["language"]),
                 "language_probability": transcription_result["language_probability"],
                 "duration_seconds": transcription_result["duration"],
                 "inference_duration": transcription_result["inference_duration"],
@@ -97,6 +103,14 @@ def transcribe_audio():
             }
         }), 200
 
+    except MissingModelError as mm_err:
+        return jsonify({
+            "success": False,
+            "error": "MODEL_MISSING",
+            "message": mm_err.message,
+            "language_requested": mm_err.language,
+            "english_fallback_available": True
+        }), 400
     except ValueError as val_err:
         return jsonify({
             "success": False,
@@ -112,3 +126,15 @@ def transcribe_audio():
             "success": False,
             "error": f"Internal transcription error: {str(e)}"
         }), 500
+
+@transcription_bp.route("/api/transcription/languages", methods=["GET"])
+def get_supported_languages():
+    """
+    Return available speech recognition models and language availability status.
+    Clearly marks missing models without pretending unavailable languages are supported.
+    """
+    service = TranscriptionService.get_instance()
+    return jsonify({
+        "success": True,
+        "data": service.get_available_languages()
+    }), 200

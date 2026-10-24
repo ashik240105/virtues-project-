@@ -10,6 +10,7 @@ Detects:
 
 import uuid
 from backend.services.medicine_service import MedicineService
+from backend.services.allergy_safety_service import AllergySafetyService, AllergyWarningState
 
 class ValidationSeverity:
     CRITICAL = "CRITICAL"    # Blocks record approval until acknowledged or resolved
@@ -208,5 +209,58 @@ class ValidationService:
                     "recommendation": "Link or verify against original note.",
                     "resolved": False
                 })
+
+        # 5. Unknown Medication Warnings (Feature 3)
+        unknown_meds = clinical_data.get("unknown_medications", [])
+        for unk in unknown_meds:
+            s_name = unk.get("suspected_entity_name", "Unknown Drug")
+            warnings.append({
+                "id": f"warn-{uuid.uuid4().hex[:6]}",
+                "severity": ValidationSeverity.WARNING,
+                "category": "Unknown Medication Alert",
+                "item_id": unk.get("id"),
+                "field": "Medication",
+                "message": f"Unknown medication — review required: Suspected entity '{s_name}' was documented with dosage/route but is not recognized in approved ambulance formulary.",
+                "recommendation": "An authorized reviewer must confirm, correct, or reject this unverified entry.",
+                "resolved": False,
+                "review_status": unk.get("review_status", "PENDING")
+            })
+
+        # 6. Allergy & Medication Safety Evaluation (Feature 4)
+        patient_allergies = clinical_data.get("patient_allergies") or []
+        encounter_allergies = clinical_data.get("allergies") or []
+
+        # If patient_id is present in clinical_data but patient_allergies not yet populated, lookup patient
+        patient_id = clinical_data.get("patient_id")
+        if patient_id and not patient_allergies:
+            from backend.database.db import get_patient
+            pt = get_patient(patient_id)
+            if pt and pt.get("allergies"):
+                patient_allergies = pt["allergies"]
+
+        safety_eval = AllergySafetyService.evaluate_safety(
+            medications=meds,
+            patient_allergies=patient_allergies,
+            encounter_allergies=encounter_allergies
+        )
+
+        for aw in safety_eval["warnings"]:
+            sev = ValidationSeverity.CRITICAL if aw["severity"] == "CRITICAL" else ValidationSeverity.WARNING
+            warnings.append({
+                "id": aw["id"],
+                "severity": sev,
+                "category": "Allergy & Medication Safety Warning",
+                "item_id": aw.get("medication_name"),
+                "field": "Medication Safety",
+                "message": aw["explanation"],
+                "explanation": aw["explanation"],
+                "warning_type": aw["warning_type"],
+                "medication_name": aw["medication_name"],
+                "recorded_allergy": aw.get("recorded_allergy"),
+                "allergy_source": aw.get("allergy_source"),
+                "evidence_basis": aw.get("evidence_basis"),
+                "recommendation": "Verify clinical appropriateness and record explicit acknowledgment if justified.",
+                "resolved": aw.get("acknowledged", False)
+            })
 
         return warnings

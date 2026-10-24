@@ -281,6 +281,19 @@ export function RecordDetailsPage({ recordId, onBack, onNavigateReview, onNaviga
             <span>JSON {isViewingHistorical ? `(v${selectedVersionNum})` : ""}</span>
           </a>
 
+          {/* Hospital Handover PDF (Feature 5) */}
+          <a
+            href={api.getHandoverPdfUrl(record.id, selectedVersionNum)}
+            target="_blank"
+            rel="noreferrer"
+            download={`handover_${record.id}.pdf`}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 text-xs font-semibold"
+            title="Download printable A4 hospital handover PDF"
+          >
+            <Download className="w-3.5 h-3.5 text-teal-700" />
+            <span>Handover PDF</span>
+          </a>
+
           {/* Versioned PDF Export */}
           <a
             href={pdfDownloadUrl}

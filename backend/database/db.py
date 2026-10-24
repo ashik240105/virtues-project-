@@ -101,7 +101,10 @@ def init_db():
         ("exported_at", "TEXT"),
         ("evidence_passport", "TEXT DEFAULT '[]'"),
         ("uncertainty_ledger", "TEXT DEFAULT '[]'"),
-        ("change_impact_radar", "TEXT DEFAULT '{}'")
+        ("change_impact_radar", "TEXT DEFAULT '{}'"),
+        ("sync_status", "TEXT DEFAULT 'SYNCHRONIZED'"),
+        ("client_updated_at", "TEXT"),
+        ("device_id", "TEXT")
     ]
     for col_name, col_type in additive_cols:
         if col_name not in existing_cols:
@@ -196,6 +199,49 @@ def init_db():
         );
     """)
 
+    # Additive Table: Unknown Medication Reviews (Feature 3)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS unknown_medication_reviews (
+            id TEXT PRIMARY KEY,
+            record_id TEXT,
+            original_text TEXT NOT NULL,
+            suspected_entity_name TEXT,
+            char_start INTEGER,
+            char_end INTEGER,
+            audio_offset REAL,
+            language TEXT DEFAULT 'en',
+            review_status TEXT NOT NULL DEFAULT 'PENDING',
+            reviewer_decision TEXT,
+            corrected_canonical_name TEXT,
+            reviewer_id TEXT,
+            decision_timestamp TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (record_id) REFERENCES records (id) ON DELETE CASCADE
+        );
+    """)
+
+    # Additive Table: Allergy Safety Warnings & Decision Log (Feature 4)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS allergy_safety_warnings (
+            id TEXT PRIMARY KEY,
+            record_id TEXT NOT NULL,
+            patient_id TEXT,
+            warning_type TEXT NOT NULL,
+            medication_name TEXT NOT NULL,
+            recorded_allergy TEXT,
+            allergy_source TEXT,
+            severity TEXT NOT NULL,
+            explanation TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            reviewer_id TEXT,
+            reviewer_decision TEXT,
+            decision_timestamp TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (record_id) REFERENCES records (id) ON DELETE CASCADE
+        );
+    """)
+
     # Additive Indexes
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_patients_name ON patients(full_name);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_patients_dob ON patients(dob);")
@@ -203,6 +249,10 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_encounters_record_id ON patient_encounters(record_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_evidence_record_id ON evidence_passports(record_id);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_versions_record_id ON record_versions(record_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_unknown_reviews_status ON unknown_medication_reviews(review_status);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_unknown_reviews_record ON unknown_medication_reviews(record_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_allergy_warnings_record ON allergy_safety_warnings(record_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_allergy_warnings_status ON allergy_safety_warnings(status);")
 
     conn.commit()
     seed_medicine_catalogue(conn)
@@ -296,18 +346,19 @@ def seed_patients(conn):
     conn.commit()
 
 def seed_medicine_catalogue(conn):
-    """Seed verified local medicine catalogue with provenance."""
+    """Seed verified local medicine catalogue with provenance, multilingual aliases, and ambulance formulary."""
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM medicine_catalogue;")
-    if cursor.fetchone()[0] > 0:
-        return
 
     # Verified EMS & First Responder Essential Medicines Catalogue (WHO Model List 2023 / EMS Formulary v1.2)
     catalog = [
         {
             "id": "MED-001",
             "canonical_name": "Paracetamol",
-            "aliases": ["Acetaminophen", "Tylenol", "Panadol", "Calpol", "APAP", "Paramol"],
+            "aliases": [
+                "Acetaminophen", "Tylenol", "Panadol", "Calpol", "APAP", "Paramol", "Crocin", "Dolo", "Dolo 650",
+                "பாராசிட்டமால்", "பேராசிட்டமால்", "காய்ச்சல் மாத்திரை",
+                "पैरासिटामोल", "क्रोसीन", "डोलो", "बुखार की गोली"
+            ],
             "category": "Analgesic / Antipyretic",
             "standard_routes": ["Oral", "IV", "PR"],
             "standard_units": ["mg", "g"],
@@ -315,12 +366,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 0,
             "contraindications_notes": "Severe hepatic impairment or active liver disease.",
             "provenance": "WHO Model List of Essential Medicines (23rd list, 2023) / Resuscitation Guidelines v1.2",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-002",
             "canonical_name": "Ibuprofen",
-            "aliases": ["Advil", "Motrin", "Nurofen", "Brufen"],
+            "aliases": [
+                "Advil", "Motrin", "Nurofen", "Brufen", "Combiflam",
+                "ஐபுப்ரூஃபன்", "ப்ரூஃபென்",
+                "इबुप्रोफेन", "ब्रुफेन", "कॉम्बीफ्लाम"
+            ],
             "category": "NSAID",
             "standard_routes": ["Oral"],
             "standard_units": ["mg"],
@@ -328,12 +383,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 0,
             "contraindications_notes": "Active GI bleeding, third-trimester pregnancy, severe renal failure.",
             "provenance": "WHO Model List of Essential Medicines (2023) / JRCALC EMS Guidelines",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-003",
             "canonical_name": "Aspirin",
-            "aliases": ["Acetylsalicylic Acid", "ASA", "Disprin", "Bayer"],
+            "aliases": [
+                "Acetylsalicylic Acid", "ASA", "Disprin", "Bayer", "Ecosprin",
+                "ஆஸ்பிரின்", "அஸ்பிரின்", "டிஸ்ப்ரின்",
+                "एस्पिरिन", "डिस्प्रिन", "इकोस्प्रिन"
+            ],
             "category": "Antiplatelet / Analgesic",
             "standard_routes": ["Oral", "Chewable"],
             "standard_units": ["mg"],
@@ -341,12 +400,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 1,
             "contraindications_notes": "Reye's syndrome risk in pediatric patients under 16; active gastrointestinal ulcer.",
             "provenance": "American Heart Association ACLS / WHO EML 2023",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-004",
             "canonical_name": "Morphine",
-            "aliases": ["Morphine Sulfate", "MS Contin", "Duramorph"],
+            "aliases": [
+                "Morphine Sulfate", "MS Contin", "Duramorph", "Roxanol",
+                "மார்ஃபின்", "மார்பின்",
+                "मॉर्फिन", "मॉर्फीन"
+            ],
             "category": "Opioid Analgesic",
             "standard_routes": ["IV", "IM", "SC", "Oral"],
             "standard_units": ["mg"],
@@ -354,12 +417,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 1,
             "contraindications_notes": "Severe respiratory depression, hypotension (systolic < 90), altered consciousness.",
             "provenance": "JRCALC Clinical Practice Guidelines / WHO EML 2023",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-005",
             "canonical_name": "Naloxone",
-            "aliases": ["Narcan", "Evzio"],
+            "aliases": [
+                "Narcan", "Evzio",
+                "நலாக்சோன்", "நார்கன்",
+                "नेलोक्सोन", "नारकान"
+            ],
             "category": "Opioid Antagonist",
             "standard_routes": ["IN", "IM", "IV", "SC"],
             "standard_units": ["mg", "mcg"],
@@ -367,12 +434,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 0,
             "contraindications_notes": "Known hypersensitivity; may precipitate acute opioid withdrawal.",
             "provenance": "WHO Guidelines on Community Management of Opioid Overdose / ACLS 2023",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-006",
             "canonical_name": "Salbutamol",
-            "aliases": ["Albuterol", "Ventolin", "Proventil", "Accuneb"],
+            "aliases": [
+                "Albuterol", "Ventolin", "Proventil", "Accuneb", "Asthalin",
+                "சல்பியூட்டமால்", "சால்புடமால்", "ஆஸ்தாலின்",
+                "सालबुटामोल", "अस्थालिन"
+            ],
             "category": "Short-acting Beta-2 Agonist (Bronchodilator)",
             "standard_routes": ["Inhaled", "Nebulized"],
             "standard_units": ["mg", "mcg", "puffs"],
@@ -380,12 +451,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 0,
             "contraindications_notes": "Severe tachycardia, caution in severe cardiac disease.",
             "provenance": "British National Formulary / WHO EML 2023",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-007",
             "canonical_name": "Nitroglycerin",
-            "aliases": ["Glyceryl Trinitrate", "GTN", "Nitrostat", "Nitrolingual"],
+            "aliases": [
+                "Glyceryl Trinitrate", "GTN", "Nitrostat", "Nitrolingual", "Nitro", "Sorbitrate",
+                "நைட்ரோகிளிசரின்", "ஜிடிஎன்", "சார்பிட்ரேட்",
+                "नाइट्रोग्लिसरीन", "जीटीएन", "सॉर्बिट्रेट"
+            ],
             "category": "Vasodilator / Nitrate",
             "standard_routes": ["Sublingual", "Transdermal", "IV"],
             "standard_units": ["mcg", "mg", "tablets", "sprays"],
@@ -393,12 +468,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 1,
             "contraindications_notes": "Hypotension (SBP < 90 mmHg), phosphodiesterase-5 inhibitor use within 24-48h.",
             "provenance": "American Heart Association ACS Guidelines / WHO EML 2023",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-008",
             "canonical_name": "Epinephrine",
-            "aliases": ["Adrenaline", "EpiPen", "Auvi-Q"],
+            "aliases": [
+                "Adrenaline", "EpiPen", "Auvi-Q", "Adrenaclick",
+                "எபினெப்ரின்", "அட்ரினலின்", "எபிபென்",
+                "एपिनेफ्रीन", "एड्रेनालाईन"
+            ],
             "category": "Sympathomimetic / Vasopressor / Anaphylaxis Agent",
             "standard_routes": ["IM", "IV", "IO", "SC", "Nebulized"],
             "standard_units": ["mg", "mcg", "ml"],
@@ -406,12 +485,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 0,
             "contraindications_notes": "No absolute contraindications in life-threatening anaphylaxis or cardiac arrest.",
             "provenance": "ILCOR Resuscitation Guidelines / WHO EML 2023",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-009",
             "canonical_name": "Fentanyl",
-            "aliases": ["Sublimaze", "Actiq", "Duragesic"],
+            "aliases": [
+                "Sublimaze", "Actiq", "Duragesic",
+                "ஃபெண்டானில்", "பெண்டானில்",
+                "फेन्टानिल"
+            ],
             "category": "Synthetic Opioid Analgesic",
             "standard_routes": ["IV", "IN", "IM", "IO"],
             "standard_units": ["mcg"],
@@ -419,12 +502,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 1,
             "contraindications_notes": "Severe respiratory depression, MAO inhibitor use.",
             "provenance": "Prehospital Trauma Life Support (PHTLS) / JRCALC 2023",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-010",
             "canonical_name": "Ondansetron",
-            "aliases": ["Zofran", "Zuplenz"],
+            "aliases": [
+                "Zofran", "Zuplenz", "Emeset", "Vomikind",
+                "ஒன்டான்செட்ரான்", "எமிசெட்",
+                "ओन्डान्सेट्रोन", "एमीसेट"
+            ],
             "category": "Antiemetic (5-HT3 Antagonist)",
             "standard_routes": ["IV", "Oral", "IM", "ODT"],
             "standard_units": ["mg"],
@@ -432,12 +519,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 0,
             "contraindications_notes": "Prolonged QT interval, concurrent apomorphine use.",
             "provenance": "WHO EML 2023 / EMS Antiemetic Protocols",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-011",
             "canonical_name": "Midazolam",
-            "aliases": ["Versed", "Hypnovel"],
+            "aliases": [
+                "Versed", "Hypnovel", "Mezolam",
+                "மிடசோலாம்", "மெசோலாம்",
+                "मिडाज़ोलम"
+            ],
             "category": "Benzodiazepine / Anticonvulsant / Sedative",
             "standard_routes": ["IN", "IV", "IM", "Buccal"],
             "standard_units": ["mg"],
@@ -445,12 +536,16 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 1,
             "contraindications_notes": "Severe respiratory depression, acute narrow-angle glaucoma.",
             "provenance": "American Epilepsy Society / JRCALC 2023",
-            "version": "1.2.0"
+            "version": "1.3.0"
         },
         {
             "id": "MED-012",
             "canonical_name": "Oxygen",
-            "aliases": ["O2", "Supplemental Oxygen"],
+            "aliases": [
+                "O2", "Supplemental Oxygen",
+                "ஆக்ஸிஜன்", "ஆக்சிஜன்", "பிராணவாயு",
+                "ऑक्सीजन", "प्राणवायु"
+            ],
             "category": "Medical Gas",
             "standard_routes": ["Inhaled", "Nasal Cannula", "Non-rebreather Mask", "BVM"],
             "standard_units": ["L/min", "%"],
@@ -458,16 +553,179 @@ def seed_medicine_catalogue(conn):
             "pediatric_warning": 0,
             "contraindications_notes": "Target 94-98% SpO2 in most acute conditions; 88-92% in patients at risk of hypercapnic respiratory failure (COPD).",
             "provenance": "British Thoracic Society Emergency Oxygen Guidelines / WHO EML 2023",
-            "version": "1.2.0"
+            "version": "1.3.0"
+        },
+        {
+            "id": "MED-013",
+            "canonical_name": "Atropine",
+            "aliases": [
+                "Atropine Sulfate",
+                "அட்ரோபின்",
+                "एट्रोपिन", "एट्रोपाइन"
+            ],
+            "category": "Anticholinergic / Parasympatholytic",
+            "standard_routes": ["IV", "IO", "IM"],
+            "standard_units": ["mg", "mcg"],
+            "typical_doses": ["0.5mg", "1mg", "3mg"],
+            "pediatric_warning": 1,
+            "contraindications_notes": "Tachycardia, hypothermic bradycardia.",
+            "provenance": "AHA ACLS Bradycardia Guidelines / WHO EML 2023",
+            "version": "1.3.0"
+        },
+        {
+            "id": "MED-014",
+            "canonical_name": "Amiodarone",
+            "aliases": [
+                "Cordarone", "Pacerone",
+                "அமியோடரோன்",
+                "एमियोडेरोन"
+            ],
+            "category": "Antiarrhythmic (Class III)",
+            "standard_routes": ["IV", "IO"],
+            "standard_units": ["mg"],
+            "typical_doses": ["150mg", "300mg"],
+            "pediatric_warning": 1,
+            "contraindications_notes": "Severe sinus node dysfunction, 2nd or 3rd degree AV block without pacemaker, cardiogenic shock.",
+            "provenance": "AHA ACLS Cardiac Arrest & Tachycardia Guidelines / WHO EML 2023",
+            "version": "1.3.0"
+        },
+        {
+            "id": "MED-015",
+            "canonical_name": "Glucagon",
+            "aliases": [
+                "GlucaGen",
+                "குளூக்ககான்", "குளுக்கோகான்",
+                "ग्लूकागन"
+            ],
+            "category": "Glucose-Elevating Agent / Pancreatic Hormone",
+            "standard_routes": ["IM", "SC", "IN"],
+            "standard_units": ["mg"],
+            "typical_doses": ["1mg", "0.5mg"],
+            "pediatric_warning": 0,
+            "contraindications_notes": "Pheochromocytoma, insulinoma.",
+            "provenance": "EMS Hypoglycemia Protocol / WHO EML 2023",
+            "version": "1.3.0"
+        },
+        {
+            "id": "MED-016",
+            "canonical_name": "Dextrose",
+            "aliases": [
+                "Glucose", "D50", "D10", "D50W", "D10W", "Oral Glucose", "Dextrose 10%", "Dextrose 50%",
+                "டெக்ஸ்ட்ரோஸ்", "குளுக்கோஸ்",
+                "डेक्सट्रोज", "ग्लूकोज"
+            ],
+            "category": "Carbohydrate / Hypoglycemia Reversal",
+            "standard_routes": ["IV", "IO", "Oral"],
+            "standard_units": ["g", "ml", "%"],
+            "typical_doses": ["10g", "25g", "100ml", "250ml"],
+            "pediatric_warning": 1,
+            "contraindications_notes": "Extravasation causes tissue necrosis (D50). D10 preferred in prehospital care.",
+            "provenance": "NAEMSP Prehospital Hypoglycemia Guidelines",
+            "version": "1.3.0"
+        },
+        {
+            "id": "MED-017",
+            "canonical_name": "Diazepam",
+            "aliases": [
+                "Valium", "Calmpose", "Diastat",
+                "டயஸெபம்", "டயாசிபம்",
+                "डायजेपाम", "वैल्शियम"
+            ],
+            "category": "Benzodiazepine / Anticonvulsant",
+            "standard_routes": ["IV", "IO", "PR", "IM"],
+            "standard_units": ["mg"],
+            "typical_doses": ["5mg", "10mg", "2.5mg"],
+            "pediatric_warning": 1,
+            "contraindications_notes": "Severe respiratory depression, myasthenia gravis.",
+            "provenance": "WHO EML 2023 / Emergency Seizure Protocols",
+            "version": "1.3.0"
+        },
+        {
+            "id": "MED-018",
+            "canonical_name": "Ketamine",
+            "aliases": [
+                "Ketalar", "Ketanest",
+                "கீட்டமைன்", "கெட்டமைன்",
+                "केटामाइन"
+            ],
+            "category": "Dissociative Anesthetic / Analgesic",
+            "standard_routes": ["IV", "IM", "IN", "IO"],
+            "standard_units": ["mg", "mg/kg"],
+            "typical_doses": ["20mg", "50mg", "100mg", "1mg/kg", "2mg/kg"],
+            "pediatric_warning": 1,
+            "contraindications_notes": "Uncontrolled severe hypertension, conditions where elevation of blood pressure would be hazardous.",
+            "provenance": "PHTLS / WHO EML 2023",
+            "version": "1.3.0"
+        },
+        {
+            "id": "MED-019",
+            "canonical_name": "Tranexamic Acid",
+            "aliases": [
+                "TXA", "Cyklokapron", "Lysteda", "Trapic",
+                "ட்ரெனெக்ஸாமிக் அமிலம்", "டிஎக்ஸ்ஏ",
+                "ट्रानेक्सामिक एसिड", "टीएक्सए"
+            ],
+            "category": "Antifibrinolytic / Hemostatic Agent",
+            "standard_routes": ["IV", "IO"],
+            "standard_units": ["g", "mg"],
+            "typical_doses": ["1g", "1000mg"],
+            "pediatric_warning": 1,
+            "contraindications_notes": "Active thromboembolic disease, subarachnoid hemorrhage, injury > 3 hours prior.",
+            "provenance": "CRASH-2 Trial / JRCALC Trauma Guidelines 2023",
+            "version": "1.3.0"
+        },
+        {
+            "id": "MED-020",
+            "canonical_name": "Normal Saline",
+            "aliases": [
+                "0.9% NaCl", "0.9% Sodium Chloride", "Saline", "IV Saline", "Physiological Saline",
+                "நார்மல் சலைன்", "சலைன்",
+                "नॉर्मल सलाइन", "सलाइन"
+            ],
+            "category": "Isotonic Crystalloid IV Fluid",
+            "standard_routes": ["IV", "IO"],
+            "standard_units": ["ml", "L"],
+            "typical_doses": ["250ml", "500ml", "1000ml", "1L"],
+            "pediatric_warning": 0,
+            "contraindications_notes": "Fluid overload, severe congestive heart failure, hypernatremia.",
+            "provenance": "WHO Model List 2023 / EMS Resuscitation Fluid Protocols",
+            "version": "1.3.0"
+        },
+        {
+            "id": "MED-021",
+            "canonical_name": "Ringer's Lactate",
+            "aliases": [
+                "Lactated Ringer's", "Hartmann's Solution", "RL", "Compound Sodium Lactate",
+                "ரிங்கர்ஸ் லாக்டேட்", "ஆர்எல்",
+                "रिंगर्स लैक्टेट", "आरएल"
+            ],
+            "category": "Balanced Crystalloid IV Fluid",
+            "standard_routes": ["IV", "IO"],
+            "standard_units": ["ml", "L"],
+            "typical_doses": ["250ml", "500ml", "1000ml", "1L"],
+            "pediatric_warning": 0,
+            "contraindications_notes": "Severe liver disease, co-administration with ceftriaxone or blood products through same line.",
+            "provenance": "WHO Model List 2023 / Advanced Trauma Life Support (ATLS)",
+            "version": "1.3.0"
         }
     ]
 
     for item in catalog:
         cursor.execute("""
-            INSERT OR REPLACE INTO medicine_catalogue (
+            INSERT INTO medicine_catalogue (
                 id, canonical_name, aliases, category, standard_routes, standard_units,
                 typical_doses, pediatric_warning, contraindications_notes, provenance, version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(canonical_name) DO UPDATE SET
+                aliases = excluded.aliases,
+                category = excluded.category,
+                standard_routes = excluded.standard_routes,
+                standard_units = excluded.standard_units,
+                typical_doses = excluded.typical_doses,
+                pediatric_warning = excluded.pediatric_warning,
+                contraindications_notes = excluded.contraindications_notes,
+                provenance = excluded.provenance,
+                version = excluded.version;
         """, (
             item["id"],
             item["canonical_name"],
@@ -520,6 +778,13 @@ def get_record(record_id):
         rec["evidence_passport"] = json.loads(rec.get("evidence_passport") or "[]")
         rec["uncertainty_ledger"] = json.loads(rec.get("uncertainty_ledger") or "[]")
         rec["change_impact_radar"] = json.loads(rec.get("change_impact_radar") or "{}")
+
+        cursor.execute("SELECT * FROM allergy_safety_warnings WHERE record_id = ? ORDER BY created_at ASC;", (record_id,))
+        rec["allergy_warnings"] = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("SELECT * FROM unknown_medication_reviews WHERE record_id = ? ORDER BY created_at ASC;", (record_id,))
+        rec["unknown_medication_reviews"] = [dict(r) for r in cursor.fetchall()]
+
         return rec
     finally:
         conn.close()
@@ -593,11 +858,7 @@ def get_patient(patient_id):
         row = cursor.fetchone()
         if not row:
             return None
-        p = dict(row)
-        p["allergies"] = json.loads(p["allergies"] or "[]")
-        p["medical_history"] = json.loads(p["medical_history"] or "[]")
-        p["emergency_contact"] = json.loads(p["emergency_contact"] or "{}")
-        return p
+        return _parse_patient_row(row)
     finally:
         conn.close()
 
@@ -616,14 +877,7 @@ def list_patients(limit=100, offset=0, search_term=None):
         else:
             cursor.execute("SELECT * FROM patients ORDER BY full_name ASC LIMIT ? OFFSET ?;", (limit, offset))
         rows = cursor.fetchall()
-        results = []
-        for r in rows:
-            p = dict(r)
-            p["allergies"] = json.loads(p["allergies"] or "[]")
-            p["medical_history"] = json.loads(p["medical_history"] or "[]")
-            p["emergency_contact"] = json.loads(p["emergency_contact"] or "{}")
-            results.append(p)
-        return results
+        return [_parse_patient_row(r) for r in rows]
     finally:
         conn.close()
 
@@ -677,6 +931,7 @@ def _parse_patient_row(row):
     p["allergies"] = json.loads(p["allergies"] or "[]")
     p["medical_history"] = json.loads(p["medical_history"] or "[]")
     p["emergency_contact"] = json.loads(p["emergency_contact"] or "{}")
+    p["date_of_birth"] = p.get("dob") or ""
     return p
 
 def create_patient(data):
@@ -697,7 +952,7 @@ def create_patient(data):
             patient_id,
             display_id,
             data.get("full_name", "").strip(),
-            data.get("dob", "").strip(),
+            (data.get("dob") or data.get("date_of_birth") or "").strip(),
             data.get("gender", "Unspecified"),
             data.get("phone", ""),
             data.get("blood_type", "Unknown"),
@@ -714,11 +969,18 @@ def create_patient(data):
         conn.close()
 
 def link_encounter(patient_id, record_id, encounter_type="NEW_ENCOUNTER"):
-    """Link an encounter record to a patient history."""
+    """Link an encounter record to a patient history (idempotent)."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
         now_iso = datetime.now(timezone.utc).isoformat()
+        cursor.execute("SELECT id FROM patient_encounters WHERE patient_id = ? AND record_id = ?;", (patient_id, record_id))
+        row = cursor.fetchone()
+        if row:
+            cursor.execute("UPDATE patient_encounters SET encounter_type = ? WHERE id = ?;", (encounter_type, row["id"]))
+            conn.commit()
+            return row["id"]
+
         enc_id = f"ENC-{uuid.uuid4().hex[:8].upper()}"
         cursor.execute("""
             INSERT OR REPLACE INTO patient_encounters (id, patient_id, record_id, encounter_type, created_at)

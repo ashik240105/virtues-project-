@@ -6,6 +6,8 @@ from flask import Blueprint, request, jsonify
 from backend.services.clinical_extractor import ClinicalExtractor
 from backend.services.validation_service import ValidationService
 from backend.services.medicine_service import MedicineService
+from backend.services.allergy_safety_service import AllergySafetyService
+from backend.services.unknown_drug_service import UnknownDrugService
 
 clinical_bp = Blueprint("clinical", __name__)
 
@@ -14,6 +16,7 @@ def extract_clinical_entities():
     """
     Extract structured clinical events from raw or edited transcript text.
     Preserves exact source phrases, character spans, and initial verification states.
+    Evaluates allergy conflicts against patient profile if patient_id is supplied.
     """
     body = request.get_json(silent=True) or {}
     text = body.get("text", "").strip()
@@ -25,6 +28,14 @@ def extract_clinical_entities():
         }), 400
 
     extracted = ClinicalExtractor.extract_all(text)
+
+    # Attach patient context if available
+    patient_id = body.get("patient_id")
+    if patient_id:
+        extracted["patient_id"] = patient_id
+    if body.get("patient_allergies"):
+        extracted["patient_allergies"] = body.get("patient_allergies")
+
     warnings = ValidationService.validate_clinical_record(extracted)
 
     return jsonify({
@@ -79,3 +90,128 @@ def get_catalogue():
         "count": len(medicines),
         "data": medicines
     }), 200
+
+@clinical_bp.route("/api/medicines/catalogue", methods=["POST"])
+def add_or_update_formulary_item():
+    """
+    Explicit administrative configuration endpoint for ambulance service to add
+    or update approved medications in the local formulary catalogue.
+    CRITICAL: Never called automatically from unknown speech mentions.
+    """
+    body = request.get_json(silent=True) or {}
+    if not body.get("canonical_name"):
+        return jsonify({
+            "success": False,
+            "error": "Field 'canonical_name' is required for formulary configuration."
+        }), 400
+
+    try:
+        actor = request.headers.get("X-Reviewer-Id", "FormularyAdmin")
+        saved_entry = UnknownDrugService.add_formulary_entry(body, actor_id=actor)
+        return jsonify({
+            "success": True,
+            "message": f"Successfully configured formulary entry '{saved_entry['canonical_name']}'.",
+            "data": saved_entry
+        }), 201
+    except ValueError as ve:
+        return jsonify({"success": False, "error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Failed to save formulary entry: {str(e)}"}), 500
+
+# -------------------------------------------------------------------------
+# Feature 3 & 4: Review Items & Allergy Warning Acknowledgments
+# -------------------------------------------------------------------------
+@clinical_bp.route("/api/records/<record_id>/allergy-warnings", methods=["GET"])
+def get_record_allergy_warnings(record_id):
+    """Retrieve persistent allergy safety warnings and reviewer decisions for a record."""
+    warnings = AllergySafetyService.get_warnings_for_record(record_id)
+    return jsonify({
+        "success": True,
+        "count": len(warnings),
+        "data": warnings
+    }), 200
+
+@clinical_bp.route("/api/records/<record_id>/allergy-warnings/<warning_id>/acknowledge", methods=["POST"])
+def acknowledge_allergy_warning(record_id, warning_id):
+    """
+    Record authorized responder decision/acknowledgment for an allergy safety warning.
+    Keeps warning visible in audit history while marking as acknowledged.
+    """
+    body = request.get_json(silent=True) or {}
+    reviewer_id = body.get("reviewer_id") or request.headers.get("X-Reviewer-Id") or "Paramedic-101"
+    decision = body.get("decision_reason") or body.get("decision") or "CLINICALLY_JUSTIFIED"
+    notes = body.get("notes", "")
+
+    updated = AllergySafetyService.acknowledge_warning(
+        warning_id=warning_id,
+        record_id=record_id,
+        reviewer_id=reviewer_id,
+        decision_reason=decision,
+        notes=notes
+    )
+
+    if not updated:
+        return jsonify({
+            "success": False,
+            "error": "Warning not found or failed to acknowledge."
+        }), 404
+
+    return jsonify({
+        "success": True,
+        "message": "Allergy warning successfully acknowledged and recorded in audit log.",
+        "data": updated
+    }), 200
+
+@clinical_bp.route("/api/records/<record_id>/unknown-medications", methods=["GET"])
+def get_record_unknown_medications(record_id):
+    """Retrieve unknown medication review items for a record."""
+    items = UnknownDrugService.get_review_items_for_record(record_id)
+    return jsonify({
+        "success": True,
+        "count": len(items),
+        "data": items
+    }), 200
+
+@clinical_bp.route("/api/records/<record_id>/unknown-medications/<item_id>/resolve", methods=["POST"])
+def resolve_unknown_medication(record_id, item_id):
+    """
+    Authorized reviewer resolution for an unknown medication mention:
+    Actions: CONFIRM | CORRECT | REJECT | UNRESOLVED.
+    Does NOT automatically promote unverified names into the trusted catalogue.
+    """
+    body = request.get_json(silent=True) or {}
+    action = body.get("action", "").upper().strip()
+    reviewer_id = body.get("reviewer_id") or request.headers.get("X-Reviewer-Id") or "Paramedic-101"
+    corrected_name = body.get("corrected_name")
+    notes = body.get("notes", "")
+
+    if not action:
+        return jsonify({
+            "success": False,
+            "error": "Field 'action' is required (CONFIRM, CORRECT, REJECT, or UNRESOLVED)."
+        }), 400
+
+    try:
+        resolved = UnknownDrugService.resolve_review_item(
+            item_id=item_id,
+            record_id=record_id,
+            action=action,
+            reviewer_id=reviewer_id,
+            corrected_name=corrected_name,
+            notes=notes
+        )
+        if not resolved:
+            return jsonify({
+                "success": False,
+                "error": "Review item not found."
+            }), 404
+
+        return jsonify({
+            "success": True,
+            "message": f"Unknown medication successfully resolved as '{action}'.",
+            "data": resolved
+        }), 200
+    except ValueError as ve:
+        return jsonify({"success": False, "error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Failed to resolve review item: {str(e)}"}), 500

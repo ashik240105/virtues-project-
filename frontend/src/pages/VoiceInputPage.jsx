@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from "react";
 import {
   Mic, FileText, User, Hash, AlertCircle, ArrowRight,
-  ShieldCheck, RefreshCw, CheckCircle2, Search, UserCheck, UserPlus, X
+  ShieldCheck, RefreshCw, CheckCircle2, Search, UserCheck, UserPlus, X, CloudUpload
 } from "lucide-react";
 import { AudioRecorder } from "../components/AudioRecorder";
 import { api } from "../services/api";
+import { offlineStorage } from "../services/offlineStorage";
+import { syncManager } from "../services/syncManager";
 
 export function VoiceInputPage({ onRecordCreated }) {
   const [callNumber, setCallNumber] = useState(`EMS-${Math.floor(1000 + Math.random() * 9000)}`);
@@ -35,11 +37,11 @@ export function VoiceInputPage({ onRecordCreated }) {
   const [regError, setRegError] = useState(null);
   const [regSuccessNotice, setRegSuccessNotice] = useState(null);
 
-  // Draft recovery state
+  // Draft recovery state (IndexedDB refresh-proof draft)
   const [recoveredDraft, setRecoveredDraft] = useState(null);
   const [draftRestoredNotice, setDraftRestoredNotice] = useState(null);
 
-  // Load patients for picker
+  // Load patients and refresh-proof drafts
   useEffect(() => {
     let isMounted = true;
     const loadPatientsList = async () => {
@@ -54,9 +56,15 @@ export function VoiceInputPage({ onRecordCreated }) {
     };
     loadPatientsList();
 
-    // Check for autosaved in-flight draft
+    // Check for refresh-safe local draft in IndexedDB first, then backend
     const checkDraft = async () => {
       try {
+        const localDraft = await offlineStorage.getDraft("active_voice_draft");
+        if (isMounted && localDraft) {
+          setRecoveredDraft({ draft: localDraft, saved_at: localDraft.timestamp, source: "IndexedDB" });
+          return;
+        }
+
         const res = await api.getAutosavedDraft("session_active");
         if (isMounted && res.success && res.data && res.data.draft) {
           setRecoveredDraft(res.data);
@@ -84,8 +92,9 @@ export function VoiceInputPage({ onRecordCreated }) {
     if (pt) {
       setSelectedPatientObj(pt);
       // Auto-populate age and gender if known
-      if (pt.date_of_birth) {
-        const birthYear = parseInt(pt.date_of_birth.split("-")[0], 10);
+      const ptDob = pt.date_of_birth || pt.dob;
+      if (ptDob) {
+        const birthYear = parseInt(ptDob.split("-")[0], 10);
         if (!isNaN(birthYear)) {
           setPatientAge(String(new Date().getFullYear() - birthYear));
         }
@@ -98,7 +107,7 @@ export function VoiceInputPage({ onRecordCreated }) {
       const sameName = patients.filter((p) => p.full_name?.toLowerCase() === pt.full_name?.toLowerCase());
       if (sameName.length > 1) {
         setPatientAmbiguityWarning(
-          `Multiple patients named "${pt.full_name}". Confirmed match by DOB (${pt.date_of_birth}) and Patient ID (${pt.patient_id_display}).`
+          `Multiple patients named "${pt.full_name}". Confirmed match by DOB (${ptDob}) and Patient ID (${pt.patient_id_display}).`
         );
       }
     }
@@ -115,12 +124,13 @@ export function VoiceInputPage({ onRecordCreated }) {
     if (d.chief_complaint) setChiefComplaint(d.chief_complaint);
     if (d.encounter_type) setEncounterType(d.encounter_type);
     if (d.patient_id) handleSelectPatient(d.patient_id);
-    setDraftRestoredNotice("In-flight draft restored successfully.");
+    setDraftRestoredNotice("In-flight draft restored successfully from local storage.");
     setRecoveredDraft(null);
   };
 
   const handleDismissDraft = async () => {
     try {
+      await offlineStorage.clearDraft("active_voice_draft");
       await api.clearAutosavedDraft("session_active");
     } catch (e) {
       // Ignore
@@ -192,19 +202,25 @@ export function VoiceInputPage({ onRecordCreated }) {
     }
   };
 
-  // Periodic autosave of draft form fields
+  // Periodic refresh-safe autosave of draft form fields to IndexedDB (and secondary backend)
   useEffect(() => {
+    const draftPayload = {
+      call_number: callNumber,
+      responder_id: responderId,
+      patient_age: patientAge,
+      patient_gender: patientGender,
+      chief_complaint: chiefComplaint,
+      encounter_type: encounterType,
+      patient_id: selectedPatientId,
+      timestamp: new Date().toISOString()
+    };
+
+    // 1. Immediately write to browser IndexedDB (guaranteed refresh-safe)
+    offlineStorage.saveDraft("active_voice_draft", draftPayload).catch(() => {});
+
+    // 2. Secondary best-effort backend cache
     const timer = setTimeout(() => {
-      api.autosaveDraft("session_active", {
-        call_number: callNumber,
-        responder_id: responderId,
-        patient_age: patientAge,
-        patient_gender: patientGender,
-        chief_complaint: chiefComplaint,
-        encounter_type: encounterType,
-        patient_id: selectedPatientId,
-        timestamp: new Date().toISOString()
-      }).catch(() => {});
+      api.autosaveDraft("session_active", draftPayload).catch(() => {});
     }, 2000);
     return () => clearTimeout(timer);
   }, [callNumber, responderId, patientAge, patientGender, chiefComplaint, encounterType, selectedPatientId]);
@@ -213,39 +229,62 @@ export function VoiceInputPage({ onRecordCreated }) {
     setIsSubmitting(true);
     setSubmitError(null);
 
+    // Stable record ID generated on client to prevent duplicates across offline retries
+    const stableId = `REC-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    const nowIso = new Date().toISOString();
+
+    const recordPayload = {
+      id: stableId,
+      call_number: callNumber,
+      responder_id: responderId,
+      created_at: nowIso,
+      client_updated_at: nowIso,
+      machine_transcript: transcriptionData.machine_transcript || "",
+      corrected_transcript: transcriptionData.corrected_transcript || "",
+      audio_filename: transcriptionData.audio_filename,
+      audio_mimetype: transcriptionData.audio_mimetype,
+      audio_duration_seconds: transcriptionData.audio_duration_seconds,
+      transcription_metadata: transcriptionData.transcription_metadata,
+      patient_id: selectedPatientId || null,
+      encounter_type: encounterType,
+      patient_summary: {
+        age: patientAge,
+        gender: patientGender,
+        chief_complaint: chiefComplaint,
+        patient_id: selectedPatientId || null
+      }
+    };
+
     try {
-      const recordPayload = {
-        call_number: callNumber,
-        responder_id: responderId,
-        machine_transcript: transcriptionData.machine_transcript || "",
-        corrected_transcript: transcriptionData.corrected_transcript || "",
-        audio_filename: transcriptionData.audio_filename,
-        audio_mimetype: transcriptionData.audio_mimetype,
-        audio_duration_seconds: transcriptionData.audio_duration_seconds,
-        transcription_metadata: transcriptionData.transcription_metadata,
-        patient_id: selectedPatientId || null,
-        encounter_type: encounterType,
-        patient_summary: {
-          age: patientAge,
-          gender: patientGender,
-          chief_complaint: chiefComplaint,
-          patient_id: selectedPatientId || null
+      if (typeof navigator !== "undefined" && navigator.onLine) {
+        try {
+          const res = await api.createRecord(recordPayload);
+          if (res.success && res.data) {
+            // Also store copy in IndexedDB for immediate offline access
+            await offlineStorage.saveOfflineRecord({
+              ...res.data,
+              sync_status: "SYNCHRONIZED"
+            });
+            await offlineStorage.clearDraft("active_voice_draft");
+            await api.clearAutosavedDraft("session_active").catch(() => {});
+            if (onRecordCreated) {
+              onRecordCreated(res.data.id);
+            }
+            return;
+          }
+        } catch (netErr) {
+          console.warn("Server unreachable or network dropped, falling back to offline IndexedDB queue:", netErr);
         }
-      };
+      }
 
-      const res = await api.createRecord(recordPayload);
-
-      if (res.success && res.data) {
-        // Clear active draft cache on success
-        await api.clearAutosavedDraft("session_active").catch(() => {});
-        if (onRecordCreated) {
-          onRecordCreated(res.data.id);
-        }
-      } else {
-        throw new Error(res.error || "Failed to create record in database.");
+      // Offline fallback: Persist in local IndexedDB and enqueue in sync queue
+      const offlineSaved = await syncManager.saveAndEnqueueRecord(recordPayload);
+      await offlineStorage.clearDraft("active_voice_draft");
+      if (onRecordCreated) {
+        onRecordCreated(offlineSaved.id);
       }
     } catch (err) {
-      setSubmitError(err.message || "Failed to save draft.");
+      setSubmitError(err.message || "Failed to save record to local storage.");
     } finally {
       setIsSubmitting(false);
     }
@@ -373,7 +412,7 @@ export function VoiceInputPage({ onRecordCreated }) {
               <option value="AMENDMENT">Clinical Amendment</option>
             </select>
           </div>
-
+          
           {/* Responder ID */}
           <div>
             <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1">
@@ -405,7 +444,7 @@ export function VoiceInputPage({ onRecordCreated }) {
           <div className="p-3 bg-clinical-teal-50/70 border border-clinical-teal-200 rounded-lg flex flex-wrap items-center justify-between text-xs text-clinical-teal-900 gap-2">
             <div className="flex items-center gap-3">
               <span className="font-bold text-slate-900">{selectedPatientObj.full_name}</span>
-              <span>DOB: <strong>{selectedPatientObj.date_of_birth}</strong></span>
+              <span>DOB: <strong>{selectedPatientObj.date_of_birth || selectedPatientObj.dob}</strong></span>
               <span>Gender: {selectedPatientObj.gender}</span>
               <span>Blood: {selectedPatientObj.blood_type || "Unknown"}</span>
             </div>

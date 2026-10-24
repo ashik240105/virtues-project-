@@ -45,6 +45,18 @@ class ModelStatus:
     MISSING = "MISSING"
     ERROR = "ERROR"
 
+class MissingModelError(RuntimeError):
+    def __init__(self, language, message):
+        super().__init__(message)
+        self.language = language
+        self.message = message
+
+SUPPORTED_LANGUAGES = {
+    "en": {"code": "en", "name": "English", "native_name": "English"},
+    "ta": {"code": "ta", "name": "Tamil", "native_name": "தமிழ்"},
+    "hi": {"code": "hi", "name": "Hindi", "native_name": "हिन्दी"}
+}
+
 class TranscriptionService:
     _instance = None
     _lock = threading.Lock()
@@ -101,6 +113,65 @@ class TranscriptionService:
             logger.error(self.status_message, exc_info=True)
             return False, self.status_message
 
+    def check_language_support(self, language="en"):
+        """
+        Verify whether the requested language model is installed locally.
+        Ensures we never claim Tamil or Hindi speech recognition is available
+        until the appropriate local model is installed and tested.
+        English remains functional even if regional models are missing.
+        """
+        lang = (language or "en").lower().strip()
+        lang_info = SUPPORTED_LANGUAGES.get(lang, {"code": lang, "name": lang, "native_name": lang})
+
+        if lang in ("en", "english"):
+            has_whisper = os.path.exists(os.path.join(MODELS_DIR, "models--Systran--faster-whisper-base")) or self.model is not None
+            return {
+                "language": "en",
+                "name": "English",
+                "available": has_whisper,
+                "status": "READY" if has_whisper else "MODEL_MISSING",
+                "message": "English speech recognition model is ready." if has_whisper else "English model not downloaded."
+            }
+
+        # Check regional language models in MODELS_DIR (Vosk or dedicated Whisper weights)
+        model_candidates = []
+        if os.path.exists(MODELS_DIR):
+            for entry in os.listdir(MODELS_DIR):
+                entry_lower = entry.lower()
+                # Skip the default English base model when searching for dedicated regional models
+                if "faster-whisper-base" in entry_lower:
+                    continue
+                if (lang == "ta" and ("tamil" in entry_lower or "vosk-model-ta" in entry_lower or "-ta" in entry_lower or "_ta" in entry_lower)) or \
+                   (lang == "hi" and ("hindi" in entry_lower or "vosk-model-hi" in entry_lower or "-hi" in entry_lower or "_hi" in entry_lower)):
+                    model_candidates.append(entry)
+
+        if model_candidates:
+            return {
+                "language": lang,
+                "name": lang_info["name"],
+                "available": True,
+                "status": "READY",
+                "model_path": os.path.join(MODELS_DIR, model_candidates[0]),
+                "message": f"Speech model for {lang_info['name']} found: {model_candidates[0]}."
+            }
+
+        return {
+            "language": lang,
+            "name": lang_info["name"],
+            "native_name": lang_info.get("native_name", ""),
+            "available": False,
+            "status": "MODEL_MISSING",
+            "message": (
+                f"Local speech recognition model for {lang_info['name']} ({lang_info.get('native_name', '')}) "
+                f"is not installed in models/. English speech recognition remains active. "
+                f"Please install the regional model in models/ to enable {lang_info['name']} speech transcription."
+            )
+        }
+
+    def get_available_languages(self):
+        """Return support and installation diagnostics for all configured languages."""
+        return [self.check_language_support(code) for code in ("en", "ta", "hi")]
+
     def get_status(self):
         """Return diagnostic status information about the speech engine."""
         return {
@@ -111,7 +182,8 @@ class TranscriptionService:
             "compute_type": self.compute_type,
             "models_directory": MODELS_DIR,
             "is_ready": self.status == ModelStatus.READY,
-            "offline_capable": True
+            "offline_capable": True,
+            "supported_languages": self.get_available_languages()
         }
 
     def convert_and_verify_audio(self, input_filepath):
@@ -152,7 +224,16 @@ class TranscriptionService:
         """
         Transcribe an audio file using faster-whisper.
         Applies clinical domain prompting and strict deterministic decoding.
+        Verifies local model presence for requested language before execution.
         """
+        lang = (language or "en").lower().strip()
+        lang_check = self.check_language_support(lang)
+        if not lang_check["available"]:
+            raise MissingModelError(
+                language=lang,
+                message=lang_check["message"]
+            )
+
         if self.status != ModelStatus.READY or self.model is None:
             # Try to auto-load if uninitialized
             success, msg = self.load_model()
@@ -297,6 +378,8 @@ class TranscriptionService:
         return {
             "transcript": full_transcript,
             "language": info.language,
+            "source_language": lang,
+            "detected_language": info.language,
             "language_probability": round(info.language_probability, 3) if hasattr(info, "language_probability") else 1.0,
             "duration": round(duration, 2),
             "inference_duration": round(elapsed, 2),

@@ -24,15 +24,29 @@ record_bp = Blueprint("records", __name__)
 
 @record_bp.route("/api/records", methods=["POST"])
 def create_record():
-    """Create a new clinical documentation record."""
+    """Create a new clinical documentation record with idempotent retry support."""
     body = request.get_json(silent=True) or {}
 
-    record_id = f"REC-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    record_id = body.get("id") or f"REC-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+    # Idempotent deduplication check: if record already exists, return cleanly
+    existing_record = get_record(record_id)
+    if existing_record:
+        return jsonify({
+            "success": True,
+            "message": "Record already synchronized (idempotent).",
+            "data": existing_record,
+            "idempotent": True
+        }), 200
+
     call_number = body.get("call_number", f"EMS-{uuid.uuid4().hex[:5].upper()}")
     responder_id = body.get("responder_id", "Paramedic-101")
     patient_id = body.get("patient_id")
     event_at = body.get("event_at")
+    created_at = body.get("created_at") or datetime.now(timezone.utc).isoformat()
     now_iso = datetime.now(timezone.utc).isoformat()
+    client_updated_at = body.get("client_updated_at", now_iso)
+    device_id = body.get("device_id", "Unknown-Device")
 
     machine_transcript = body.get("machine_transcript", "").strip()
     corrected_transcript = body.get("corrected_transcript", machine_transcript).strip()
@@ -48,25 +62,35 @@ def create_record():
         clinical_data = ClinicalExtractor.extract_all(corrected_transcript)
     elif not clinical_data:
         clinical_data = {"vital_signs": [], "medications": [], "symptoms": [], "procedures": [], "timestamps": []}
+    elif clinical_data and corrected_transcript:
+        vitals = clinical_data.get("vital_signs") or []
+        if any(v.get("timestamp") is None for v in vitals):
+            ts_list = ClinicalExtractor.extract_timestamps(corrected_transcript)
+            if ts_list:
+                clinical_data["vital_signs"] = ClinicalExtractor._correlate_entity_timestamps(vitals, ts_list, corrected_transcript)
+                clinical_data["medications"] = ClinicalExtractor._correlate_entity_timestamps(clinical_data.get("medications", []), ts_list, corrected_transcript)
+                clinical_data["procedures"] = ClinicalExtractor._correlate_entity_timestamps(clinical_data.get("procedures", []), ts_list, corrected_transcript)
 
     # Validate clinical entities
     validation_warnings = ValidationService.validate_clinical_record(clinical_data)
 
     # Compile Evidence Passport and Uncertainty Ledger
-    evidence_passport = EvidencePassportService.compile_evidence_passport(
-        record_id=record_id,
-        clinical_data=clinical_data,
-        transcript_text=corrected_transcript,
-        transcription_meta=transcription_meta,
-        reviewer_decisions=body.get("review_decisions", {})
-    )
+    evidence_passport = body.get("evidence_passport")
+    if not evidence_passport:
+        evidence_passport = EvidencePassportService.compile_evidence_passport(
+            record_id=record_id,
+            clinical_data=clinical_data,
+            transcript_text=corrected_transcript,
+            transcription_meta=transcription_meta,
+            reviewer_decisions=body.get("review_decisions", {})
+        )
 
     uncertainty_ledger = UncertaintyService.compile_uncertainty_ledger(
         clinical_data=clinical_data,
         warnings=validation_warnings
     )
 
-    initial_status = "Needs Review" if (clinical_data.get("vital_signs") or clinical_data.get("medications")) else "Draft"
+    initial_status = body.get("status") or ("Needs Review" if (clinical_data.get("vital_signs") or clinical_data.get("medications")) else "Draft")
 
     conn = get_db_connection()
     try:
@@ -78,16 +102,17 @@ def create_record():
                 audio_duration_seconds, machine_transcript, corrected_transcript,
                 transcription_metadata, clinical_data, validation_warnings,
                 review_decisions, patient_summary, version, patient_id, event_at,
-                evidence_passport, uncertainty_ledger, change_impact_radar
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?);
+                evidence_passport, uncertainty_ledger, change_impact_radar,
+                sync_status, client_updated_at, device_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 'SYNCHRONIZED', ?, ?);
         """, (
             record_id,
             call_number,
             responder_id,
             initial_status,
+            created_at,
             now_iso,
-            now_iso,
-            body.get("recording_time", now_iso),
+            body.get("recording_time", created_at),
             body.get("transcription_time", now_iso if machine_transcript else None),
             audio_filename,
             audio_mimetype,
@@ -103,13 +128,26 @@ def create_record():
             event_at,
             json.dumps(evidence_passport),
             json.dumps(uncertainty_ledger),
-            json.dumps({})
+            json.dumps({}),
+            client_updated_at,
+            device_id
         ))
         conn.commit()
 
         # Link to patient if provided
         if patient_id:
             link_encounter(patient_id, record_id, body.get("encounter_type", "NEW_ENCOUNTER"))
+
+        # Persist unknown drug review items if detected (Feature 3)
+        if clinical_data.get("unknown_medications"):
+            from backend.services.unknown_drug_service import UnknownDrugService
+            UnknownDrugService.persist_review_items(record_id, clinical_data["unknown_medications"])
+
+        # Persist allergy safety warnings if detected (Feature 4)
+        allergy_warnings = [w for w in validation_warnings if w.get("category") == "Allergy & Medication Safety Warning"]
+        if allergy_warnings:
+            from backend.services.allergy_safety_service import AllergySafetyService
+            AllergySafetyService.persist_warnings_for_record(record_id, patient_id, allergy_warnings)
 
         log_audit_event(
             record_id=record_id,
@@ -121,7 +159,8 @@ def create_record():
                 "patient_id": patient_id,
                 "has_audio": bool(audio_filename),
                 "warnings_count": len(validation_warnings),
-                "evidence_passport_items": len(evidence_passport)
+                "evidence_passport_items": len(evidence_passport),
+                "device_id": device_id
             }
         )
 
@@ -138,6 +177,212 @@ def create_record():
         }), 500
     finally:
         conn.close()
+
+@record_bp.route("/api/records/sync", methods=["POST"])
+def sync_records():
+    """
+    Idempotent offline synchronization endpoint for emergency responders.
+    Accepts a batch of offline-created or offline-updated records.
+    Detects conflicts without silently overwriting newer server data.
+    Preserves stable client-generated record IDs and original timestamps.
+    """
+    body = request.get_json(silent=True) or {}
+    device_id = body.get("device_id", "Unknown-Device")
+    incoming_records = body.get("records", [])
+    if isinstance(body, list):
+        incoming_records = body
+
+    synced = []
+    conflicts = []
+    failed = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for item in incoming_records:
+        rec_id = item.get("id")
+        if not rec_id:
+            failed.append({"item": item, "error": "Missing record id"})
+            continue
+
+        try:
+            existing = get_record(rec_id)
+            if not existing:
+                # 1. New record created offline: Insert with stable ID
+                call_number = item.get("call_number", f"EMS-{uuid.uuid4().hex[:5].upper()}")
+                responder_id = item.get("responder_id", "Paramedic-101")
+                created_at = item.get("created_at") or now_iso
+                updated_at = item.get("updated_at") or created_at
+                client_updated_at = item.get("client_updated_at") or updated_at
+                machine_transcript = item.get("machine_transcript", "").strip()
+                corrected_transcript = item.get("corrected_transcript", machine_transcript).strip()
+                clinical_data = item.get("clinical_data")
+                if not clinical_data and corrected_transcript:
+                    clinical_data = ClinicalExtractor.extract_all(corrected_transcript)
+                elif not clinical_data:
+                    clinical_data = {"vital_signs": [], "medications": [], "symptoms": [], "procedures": [], "timestamps": []}
+
+                validation_warnings = ValidationService.validate_clinical_record(clinical_data)
+                initial_status = item.get("status") or ("Needs Review" if (clinical_data.get("vital_signs") or clinical_data.get("medications")) else "Draft")
+
+                conn = get_db_connection()
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO records (
+                            id, call_number, responder_id, status, created_at, updated_at,
+                            recording_time, transcription_time, audio_filename, audio_mimetype,
+                            audio_duration_seconds, machine_transcript, corrected_transcript,
+                            transcription_metadata, clinical_data, validation_warnings,
+                            review_decisions, patient_summary, version, patient_id, event_at,
+                            evidence_passport, uncertainty_ledger, change_impact_radar,
+                            sync_status, client_updated_at, device_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 'SYNCHRONIZED', ?, ?);
+                    """, (
+                        rec_id, call_number, responder_id, initial_status, created_at, updated_at,
+                        item.get("recording_time", created_at),
+                        item.get("transcription_time"),
+                        item.get("audio_filename", ""),
+                        item.get("audio_mimetype", "audio/webm"),
+                        float(item.get("audio_duration_seconds", 0.0)),
+                        machine_transcript, corrected_transcript,
+                        json.dumps(item.get("transcription_metadata", {})),
+                        json.dumps(clinical_data),
+                        json.dumps(validation_warnings),
+                        json.dumps(item.get("review_decisions", {})),
+                        json.dumps(item.get("patient_summary", {})),
+                        item.get("patient_id"),
+                        item.get("event_at"),
+                        json.dumps([]),
+                        json.dumps([]),
+                        json.dumps({}),
+                        client_updated_at,
+                        device_id
+                    ))
+                    conn.commit()
+
+                    if item.get("patient_id"):
+                        link_encounter(item["patient_id"], rec_id, item.get("encounter_type", "NEW_ENCOUNTER"))
+
+                    if clinical_data.get("unknown_medications"):
+                        from backend.services.unknown_drug_service import UnknownDrugService
+                        UnknownDrugService.persist_review_items(rec_id, clinical_data["unknown_medications"])
+
+                    sync_allergy_warnings = [w for w in validation_warnings if w.get("category") == "Allergy & Medication Safety Warning"]
+                    if sync_allergy_warnings:
+                        from backend.services.allergy_safety_service import AllergySafetyService
+                        AllergySafetyService.persist_warnings_for_record(rec_id, item.get("patient_id"), sync_allergy_warnings)
+
+                    log_audit_event(
+                        record_id=rec_id,
+                        action="OFFLINE_SYNC_CREATE",
+                        actor=responder_id,
+                        details={"device_id": device_id, "synced_at": now_iso, "original_created_at": created_at}
+                    )
+                    synced.append(get_record(rec_id))
+                finally:
+                    conn.close()
+
+            else:
+                # 2. Existing record on server: Check for conflict
+                client_base_version = item.get("base_version", item.get("version", 1))
+                server_version = existing.get("version", 1)
+
+                # If server is Approved and client is trying to modify without amendment
+                if existing.get("status") == "Approved" and item.get("status") != "Approved":
+                    conflicts.append({
+                        "id": rec_id,
+                        "reason": "Server record is already Approved (immutable). Submit via /amend instead.",
+                        "server_record": existing,
+                        "client_record": item
+                    })
+                    continue
+
+                # If server version > client's base version, conflict detected
+                if server_version > client_base_version:
+                    conflicts.append({
+                        "id": rec_id,
+                        "reason": f"Conflict: Server record is at version {server_version}, but offline edit was based on version {client_base_version}.",
+                        "server_record": existing,
+                        "client_record": item
+                    })
+                    continue
+
+                # If client edit timestamp is older than server's last updated_at and data differs
+                server_updated = existing.get("updated_at", "")
+                client_updated = item.get("client_updated_at") or item.get("updated_at", "")
+                if server_updated and client_updated and server_updated > client_updated:
+                    if existing.get("corrected_transcript") != item.get("corrected_transcript"):
+                        conflicts.append({
+                            "id": rec_id,
+                            "reason": f"Conflict: Server record has newer update ({server_updated}) than client offline draft ({client_updated}).",
+                            "server_record": existing,
+                            "client_record": item
+                        })
+                        continue
+
+                # Safe update or idempotent repeat
+                corrected_transcript = item.get("corrected_transcript", existing.get("corrected_transcript", ""))
+                clinical_data = item.get("clinical_data", existing.get("clinical_data", {}))
+                review_decisions = item.get("review_decisions", existing.get("review_decisions", {}))
+                patient_summary = item.get("patient_summary", existing.get("patient_summary", {}))
+                status = item.get("status", existing.get("status", "Draft"))
+                responder_id = item.get("responder_id", existing.get("responder_id", "Paramedic-101"))
+
+                validation_warnings = ValidationService.validate_clinical_record(clinical_data)
+
+                conn = get_db_connection()
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        UPDATE records SET
+                            responder_id = ?,
+                            status = ?,
+                            updated_at = ?,
+                            corrected_transcript = ?,
+                            clinical_data = ?,
+                            validation_warnings = ?,
+                            review_decisions = ?,
+                            patient_summary = ?,
+                            client_updated_at = ?,
+                            device_id = ?,
+                            sync_status = 'SYNCHRONIZED'
+                        WHERE id = ?;
+                    """, (
+                        responder_id, status, now_iso, corrected_transcript,
+                        json.dumps(clinical_data), json.dumps(validation_warnings),
+                        json.dumps(review_decisions), json.dumps(patient_summary),
+                        client_updated, device_id, rec_id
+                    ))
+                    conn.commit()
+
+                    log_audit_event(
+                        record_id=rec_id,
+                        action="OFFLINE_SYNC_UPDATE",
+                        actor=responder_id,
+                        details={"device_id": device_id, "synced_at": now_iso, "client_updated_at": client_updated}
+                    )
+                    synced.append(get_record(rec_id))
+                finally:
+                    conn.close()
+
+        except Exception as e:
+            failed.append({"id": rec_id, "error": str(e)})
+
+    has_conflicts = len(conflicts) > 0
+    all_ok = len(failed) == 0 and not has_conflicts
+    status_code = 200 if all_ok else (409 if has_conflicts else 207)
+
+    return jsonify({
+        "success": all_ok,
+        "data": {
+            "synced_count": len(synced),
+            "conflicts_count": len(conflicts),
+            "failed_count": len(failed),
+            "synced": synced,
+            "conflicts": conflicts,
+            "failed": failed,
+            "server_time": now_iso
+        }
+    }), status_code
 
 @record_bp.route("/api/records", methods=["GET"])
 def get_records_list():
@@ -197,6 +442,14 @@ def update_record(record_id):
 
     corrected_transcript = body.get("corrected_transcript", rec["corrected_transcript"])
     clinical_data = body.get("clinical_data", rec["clinical_data"])
+    if clinical_data and corrected_transcript:
+        vitals = clinical_data.get("vital_signs") or []
+        if any(v.get("timestamp") is None for v in vitals):
+            ts_list = ClinicalExtractor.extract_timestamps(corrected_transcript)
+            if ts_list:
+                clinical_data["vital_signs"] = ClinicalExtractor._correlate_entity_timestamps(vitals, ts_list, corrected_transcript)
+                clinical_data["medications"] = ClinicalExtractor._correlate_entity_timestamps(clinical_data.get("medications", []), ts_list, corrected_transcript)
+                clinical_data["procedures"] = ClinicalExtractor._correlate_entity_timestamps(clinical_data.get("procedures", []), ts_list, corrected_transcript)
     review_decisions = body.get("review_decisions", rec["review_decisions"])
     patient_summary = body.get("patient_summary", rec["patient_summary"])
     status = body.get("status", rec["status"])
@@ -555,6 +808,72 @@ def export_pdf(record_id):
         as_attachment=True,
         download_name=filename
     )
+
+@record_bp.route("/api/records/<record_id>/handover", methods=["GET"])
+def get_hospital_handover_data(record_id):
+    """
+    Feature 5: Hospital Handover Document Payload.
+    Provides structured clinical handover data covering Sections A through G.
+    Supports ?version=N for historical snapshot audit.
+    """
+    rec = get_record(record_id)
+    if not rec:
+        return jsonify({"success": False, "error": "Record not found."}), 404
+
+    version_num = request.args.get("version", type=int)
+    handover_data = ReportService.generate_handover_data(record_id, version_num=version_num)
+    if not handover_data:
+        return jsonify({"success": False, "error": "Failed to generate hospital handover data."}), 500
+
+    return jsonify({
+        "success": True,
+        "record_id": record_id,
+        "data": handover_data
+    }), 200
+
+@record_bp.route("/api/records/<record_id>/handover/pdf", methods=["GET"])
+def export_hospital_handover_pdf(record_id):
+    """
+    Feature 5: Printable Hospital Handover Page PDF.
+    Generates and serves professional A4 PDF using ReportLab with Sections A through G,
+    grayscale contrast optimization, and document status banners.
+    Supports ?version=N.
+    """
+    rec = get_record(record_id)
+    if not rec:
+        return jsonify({"success": False, "error": "Record not found."}), 404
+
+    version_num = request.args.get("version", type=int)
+    pdf_path = ReportService.generate_handover_pdf(record_id, version_num=version_num)
+    if not pdf_path or not os.path.exists(pdf_path):
+        return jsonify({"success": False, "error": "Failed to compile hospital handover PDF."}), 500
+
+    ver_suffix = f"_v{version_num}" if version_num is not None else f"_v{rec.get('version', 1)}"
+    filename = f"hospital_handover_{record_id}{ver_suffix}.pdf"
+    return send_file(
+        pdf_path,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=filename
+    )
+
+@record_bp.route("/api/records/<record_id>/timeline", methods=["GET"])
+def get_case_timeline(record_id):
+    """
+    Ongoing Case Timeline and Vitals Chart API (Features A, B, C, D, E).
+    Aggregates chronological vital signs, medication administration events,
+    procedures, review milestones, and plottable chart series with source evidence.
+    """
+    from backend.services.timeline_service import TimelineService
+    timeline_data = TimelineService.build_case_timeline(record_id)
+    if not timeline_data:
+        return jsonify({"success": False, "error": "Record not found."}), 404
+
+    return jsonify({
+        "success": True,
+        "record_id": record_id,
+        "data": timeline_data
+    }), 200
 
 @record_bp.route("/api/records/<record_id>/audit", methods=["GET"])
 def get_audit_trail(record_id):

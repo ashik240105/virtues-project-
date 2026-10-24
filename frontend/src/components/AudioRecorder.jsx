@@ -20,6 +20,24 @@ export function AudioRecorder({ onTranscriptionComplete, onSaveDraft }) {
   const [selectedFile, setSelectedFile] = useState(null);
   const [transcribeElapsed, setTranscribeElapsed] = useState(0);
 
+  // Multilingual speech recognition configuration
+  const [selectedLanguage, setSelectedLanguage] = useState("en");
+  const [languageStatusList, setLanguageStatusList] = useState([
+    { language: "en", name: "English", available: true },
+    { language: "ta", name: "Tamil", native_name: "தமிழ்", available: false },
+    { language: "hi", name: "Hindi", native_name: "हिन्दी", available: false }
+  ]);
+
+  useEffect(() => {
+    api.getTranscriptionLanguages()
+      .then((res) => {
+        if (res && res.success && res.data) {
+          setLanguageStatusList(res.data);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // Word token inspector state
   const [showWordInspector, setShowWordInspector] = useState(true);
   const [selectedWordIndex, setSelectedWordIndex] = useState(null);
@@ -222,6 +240,7 @@ export function AudioRecorder({ onTranscriptionComplete, onSaveDraft }) {
       const filename = selectedFile?.name || `field_recording_${Date.now()}.${ext}`;
 
       formData.append("audio", audioBlob, filename);
+      formData.append("language", selectedLanguage);
 
       const res = await api.transcribeAudio(formData);
 
@@ -287,6 +306,28 @@ export function AudioRecorder({ onTranscriptionComplete, onSaveDraft }) {
           <Upload className="w-4 h-4" />
           <span>Upload Audio File</span>
         </button>
+      </div>
+
+      {/* Language Selector & Status */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between px-6 py-2.5 bg-slate-50/90 border-b border-slate-200 text-xs gap-2">
+        <div className="flex items-center gap-2">
+          <span className="font-semibold text-slate-700">Speech Model:</span>
+          <select
+            value={selectedLanguage}
+            onChange={(e) => setSelectedLanguage(e.target.value)}
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-800 font-medium focus:ring-1 focus:ring-clinical-teal-500 shadow-sm"
+          >
+            <option value="en">English (Whisper Base - Ready)</option>
+            <option value="ta">Tamil / தமிழ் (Regional model)</option>
+            <option value="hi">Hindi / हिन्दी (Regional model)</option>
+          </select>
+        </div>
+        {selectedLanguage !== "en" && (
+          <div className="flex items-center gap-1.5 text-amber-800 font-medium bg-amber-50 px-2.5 py-1 rounded border border-amber-200">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+            <span>Regional speech recognition model not installed in models/. English transcription remains active. (Typed notes in Tamil/Hindi fully supported)</span>
+          </div>
+        )}
       </div>
 
       <div className="p-6 space-y-6">

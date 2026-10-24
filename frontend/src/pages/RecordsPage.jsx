@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
-import { FileText, Search, Filter, Download, ArrowRight, Mic, Plus } from "lucide-react";
+import { FileText, Search, Filter, Download, ArrowRight, Mic, Plus, CloudUpload } from "lucide-react";
 import { api } from "../services/api";
+import { offlineStorage } from "../services/offlineStorage";
 import { StatusBadge } from "../components/StatusBadge";
 
 export function RecordsPage({ onSelectRecord, onNewRecord }) {
@@ -13,10 +14,40 @@ export function RecordsPage({ onSelectRecord, onNewRecord }) {
     let isMounted = true;
     const fetchRecords = async () => {
       try {
-        const params = {};
-        if (statusFilter !== "ALL") params.status = statusFilter;
-        const res = await api.listRecords(params);
-        if (isMounted) setRecords(res.data || []);
+        let serverRecords = [];
+        try {
+          const params = {};
+          if (statusFilter !== "ALL") params.status = statusFilter;
+          const res = await api.listRecords(params);
+          serverRecords = res.data || [];
+        } catch (netErr) {
+          console.warn("Backend offline or unreachable, serving from local storage:", netErr);
+        }
+
+        // Retrieve local offline records
+        let offlineList = [];
+        try {
+          offlineList = await offlineStorage.getAllOfflineRecords();
+        } catch (e) {
+          console.warn("Could not read local offline storage:", e);
+        }
+
+        // Merge: server records + unsynced/local offline records (offline takes precedence for unsynced changes)
+        const recordMap = new Map();
+        for (const s of serverRecords) {
+          recordMap.set(s.id, s);
+        }
+        for (const off of offlineList) {
+          if (!recordMap.has(off.id) || off.sync_status === "PENDING_SYNC" || off.sync_status === "CONFLICT") {
+            recordMap.set(off.id, off);
+          }
+        }
+
+        const merged = Array.from(recordMap.values());
+        // Sort newest first
+        merged.sort((a, b) => new Date(b.created_at || b.updated_at) - new Date(a.created_at || a.updated_at));
+
+        if (isMounted) setRecords(merged);
       } catch (err) {
         console.error("Failed to load records list:", err);
       } finally {
@@ -125,8 +156,19 @@ export function RecordsPage({ onSelectRecord, onNewRecord }) {
                       {new Date(rec.created_at).toLocaleString()}
                     </td>
                     <td className="px-6 py-4">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         <StatusBadge status={rec.status} />
+                        {rec.sync_status === "PENDING_SYNC" && (
+                          <span className="inline-flex items-center gap-1 text-[10px] bg-amber-100 text-amber-800 font-semibold px-2 py-0.5 rounded-full border border-amber-200">
+                            <CloudUpload className="w-3 h-3 text-amber-600" />
+                            Offline
+                          </span>
+                        )}
+                        {rec.sync_status === "CONFLICT" && (
+                          <span className="inline-flex items-center gap-1 text-[10px] bg-rose-100 text-rose-800 font-semibold px-2 py-0.5 rounded-full border border-rose-200">
+                            Conflict
+                          </span>
+                        )}
                         {rec.version > 1 && (
                           <span className="text-[10px] bg-purple-100 text-purple-800 font-bold px-1.5 py-0.5 rounded">
                             v{rec.version}

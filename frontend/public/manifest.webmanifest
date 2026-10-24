@@ -1,0 +1,27 @@
+{
+  "name": "Field-to-Record: Emergency Clinical Documentation",
+  "short_name": "Field-to-Record",
+  "description": "Offline-First Voice-to-Structured Clinical Documentation Assistant for Emergency First Responders",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0f172a",
+  "theme_color": "#0f766e",
+  "categories": ["medical", "productivity"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "48x48",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
+

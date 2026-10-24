@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { Activity, Mic, FileText, Settings, ShieldCheck, AlertCircle, Users, BarChart3 } from "lucide-react";
+import { Activity, Mic, FileText, Settings, ShieldCheck, AlertCircle, Users } from "lucide-react";
 import { api } from "../services/api";
+import { SyncStatusIndicator } from "./SyncStatusIndicator";
 
 export function Navbar({ activeTab, setActiveTab }) {
   const [modelStatus, setModelStatus] = useState({ ready: false, message: "Checking..." });
@@ -80,21 +81,26 @@ export function Navbar({ activeTab, setActiveTab }) {
             })}
           </nav>
 
-          {/* Offline & Whisper Status Badge */}
-          <div className="hidden md:flex items-center gap-2.5 bg-clinical-navy-800/80 px-3 py-1.5 rounded-full border border-slate-700 text-xs">
-            {modelStatus.ready ? (
-              <>
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                <span className="text-slate-200 font-medium">Whisper {modelStatus.message}</span>
-              </>
-            ) : (
-              <>
-                <span className="w-2 h-2 rounded-full bg-amber-400"></span>
-                <AlertCircle className="w-4 h-4 text-amber-400" />
-                <span className="text-slate-300 font-medium">{modelStatus.message}</span>
-              </>
-            )}
+          {/* Right Status Controls */}
+          <div className="flex items-center gap-2">
+            <SyncStatusIndicator />
+
+            {/* Whisper Status Badge */}
+            <div className="hidden lg:flex items-center gap-2 bg-clinical-navy-800/80 px-2.5 py-1 rounded-full border border-slate-700 text-xs">
+              {modelStatus.ready ? (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-slate-200 font-medium">Whisper {modelStatus.message}</span>
+                </>
+              ) : (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-slate-300 font-medium">{modelStatus.message}</span>
+                </>
+              )}
+            </div>
           </div>
         </div>
       </div>

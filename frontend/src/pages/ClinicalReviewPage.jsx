@@ -7,7 +7,7 @@ import {
 import { api } from "../services/api";
 import { StatusBadge, SeverityBadge, VerificationBadge } from "../components/StatusBadge";
 
-export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline }) {
+export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline, onNavigateHandover }) {
   const [record, setRecord] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -31,6 +31,8 @@ export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline }) {
     timestamps: []
   });
   const [warnings, setWarnings] = useState([]);
+  const [unknownReviews, setUnknownReviews] = useState([]);
+  const [allergyWarnings, setAllergyWarnings] = useState([]);
   const [overrideNotes, setOverrideNotes] = useState("");
   const [showOverrideModal, setShowOverrideModal] = useState(false);
 
@@ -52,6 +54,8 @@ export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline }) {
             timestamps: rec.clinical_data?.timestamps || []
           });
           setWarnings(rec.validation_warnings || []);
+          setUnknownReviews(rec.unknown_medication_reviews || []);
+          setAllergyWarnings(rec.allergy_warnings || []);
         }
       } catch (err) {
         if (isMounted) setError(err.message || "Failed to load clinical record.");
@@ -126,6 +130,68 @@ export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline }) {
     setWarnings((prev) =>
       prev.map((w) => (w.id === warningId ? { ...w, resolved: !w.resolved } : w))
     );
+  };
+
+  // Handle Unknown Drug Resolution (Feature 3)
+  const handleResolveUnknown = async (itemId, action) => {
+    let correctedName = null;
+    if (action === "CORRECT") {
+      correctedName = prompt("Enter the verified canonical medication name from approved formulary:");
+      if (!correctedName) return;
+    }
+    const notes = prompt(`Enter clinical justification notes for marking this item as ${action}:`);
+    if (notes === null) return;
+
+    setSaving(true);
+    try {
+      const res = await api.resolveUnknownMedication(recordId, itemId, {
+        action,
+        reviewer_id: "First Responder / Supervisor",
+        corrected_name: correctedName,
+        notes
+      });
+      if (res.success && res.data) {
+        setUnknownReviews((prev) =>
+          prev.map((item) => (item.id === itemId ? res.data : item))
+        );
+        setWarnings((prev) =>
+          prev.map((w) => (w.item_id === itemId ? { ...w, resolved: action !== "UNRESOLVED" } : w))
+        );
+        setSuccessMsg(`Unknown medication item successfully marked as ${action}.`);
+      }
+    } catch (err) {
+      setError(err.message || "Failed to resolve unknown medication.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Handle Allergy Warning Acknowledgment (Feature 4)
+  const handleAcknowledgeAllergyWarning = async (warningId) => {
+    const reason = prompt("Enter clinical justification / rationale for acknowledging this allergy warning (e.g., emergent indication, tolerance verified):");
+    if (!reason) return;
+
+    setSaving(true);
+    try {
+      const res = await api.acknowledgeAllergyWarning(recordId, warningId, {
+        reviewer_id: "First Responder / Supervisor",
+        decision_reason: reason,
+        notes: "Acknowledged via clinical review interface"
+      });
+      if (res.success && res.data) {
+        setAllergyWarnings((prev) =>
+          prev.map((w) => (w.id === warningId ? res.data : w))
+        );
+        setWarnings((prev) =>
+          prev.map((w) => (w.id === warningId ? { ...w, resolved: true } : w))
+        );
+        setSuccessMsg("Allergy warning acknowledged with clinical justification logged in audit trail.");
+      }
+    } catch (err) {
+      setError(err.message || "Failed to acknowledge allergy warning.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   // Save changes to backend
@@ -246,6 +312,25 @@ export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline }) {
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            onClick={() => onNavigateHandover ? onNavigateHandover(record.id) : null}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 text-xs font-bold"
+            title="Open printable hospital handover page (Sections A-G)"
+          >
+            <FileText className="w-3.5 h-3.5 text-teal-700" />
+            <span>Hospital Handover</span>
+          </button>
+          <a
+            href={api.getHandoverPdfUrl(record.id)}
+            target="_blank"
+            rel="noreferrer"
+            download={`handover_${record.id}.pdf`}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
+            title="Download printable A4 hospital handover PDF"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Handover PDF</span>
+          </a>
           <button
             onClick={() => onNavigateTimeline(record.id)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
@@ -712,6 +797,187 @@ export function ClinicalReviewPage({ recordId, onBack, onNavigateTimeline }) {
                 </div>
               )}
             </div>
+
+            {/* FEATURE 3: UNKNOWN MEDICATION ALERTS & REVIEW QUEUE */}
+            {(unknownReviews.length > 0 || (clinicalData.unknown_medications && clinicalData.unknown_medications.length > 0)) && (
+              <div className="bg-white rounded-xl shadow-sm border-2 border-amber-300 p-5 space-y-3">
+                <div className="flex items-center justify-between border-b border-amber-200 pb-2">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600" />
+                    <h3 className="text-sm font-bold text-amber-950">
+                      Unknown Medication — Review Required ({unknownReviews.length || clinicalData.unknown_medications?.length})
+                    </h3>
+                  </div>
+                  <span className="text-[11px] bg-amber-100 text-amber-900 font-semibold px-2 py-0.5 rounded">
+                    Formulary Exception Queue
+                  </span>
+                </div>
+                <p className="text-xs text-amber-800">
+                  Suspected drug entities documented with dosage/route that are not recognized in the approved ambulance catalogue. Authorized clinical reviewer action required:
+                </p>
+
+                <div className="space-y-3">
+                  {(unknownReviews.length > 0 ? unknownReviews : (clinicalData.unknown_medications || [])).map((unk) => (
+                    <div key={unk.id} className="p-3.5 bg-amber-50/70 border border-amber-200 rounded-lg space-y-2">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-sm text-slate-900">
+                              {unk.suspected_entity_name || "Uncatalogued Drug"}
+                            </span>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                              unk.review_status === "CONFIRMED" ? "bg-emerald-100 text-emerald-800" :
+                              unk.review_status === "CORRECTED" ? "bg-blue-100 text-blue-800" :
+                              unk.review_status === "REJECTED" ? "bg-rose-100 text-rose-800" :
+                              "bg-amber-100 text-amber-800"
+                            }`}>
+                              STATUS: {unk.review_status || "PENDING"}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-600 mt-1">
+                            Original text: <span className="font-mono italic">"{unk.original_text}"</span>
+                          </p>
+                          {unk.notes && (
+                            <p className="text-[11px] text-slate-500 italic mt-0.5">
+                              Reviewer Notes: {unk.notes}
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Reviewer Action Buttons */}
+                        {unk.review_status === "PENDING" || unk.review_status === "UNRESOLVED" ? (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <button
+                              onClick={() => handleResolveUnknown(unk.id, "CONFIRM")}
+                              disabled={saving || record.status === "Approved"}
+                              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-semibold shadow-sm"
+                              title="Confirm as valid non-formulary transfer drug without auto-promoting to catalogue"
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              onClick={() => handleResolveUnknown(unk.id, "CORRECT")}
+                              disabled={saving || record.status === "Approved"}
+                              className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold shadow-sm"
+                              title="Map to approved catalogue medication"
+                            >
+                              Correct
+                            </button>
+                            <button
+                              onClick={() => handleResolveUnknown(unk.id, "REJECT")}
+                              disabled={saving || record.status === "Approved"}
+                              className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded text-xs font-semibold shadow-sm"
+                              title="Reject spurious mention"
+                            >
+                              Reject
+                            </button>
+                            <button
+                              onClick={() => handleResolveUnknown(unk.id, "UNRESOLVED")}
+                              disabled={saving || record.status === "Approved"}
+                              className="px-2.5 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-xs font-semibold"
+                              title="Leave for subsequent clinical supervisor audit"
+                            >
+                              Unresolved
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-slate-500 text-right">
+                            Resolved by <span className="font-semibold">{unk.reviewer_id}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[11px] text-slate-500 italic pt-1">
+                  Governance Rule: Reviewer confirmation records clinical justification for this encounter only and never automatically promotes unknown names into the trusted formulary.
+                </p>
+              </div>
+            )}
+
+            {/* FEATURE 4: ALLERGY & MEDICATION SAFETY WARNINGS */}
+            {allergyWarnings.length > 0 && (
+              <div className="bg-white rounded-xl shadow-sm border-2 border-red-300 p-5 space-y-3">
+                <div className="flex items-center justify-between border-b border-red-200 pb-2">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-red-600" />
+                    <h3 className="text-sm font-bold text-red-950">
+                      Allergy & Medication Safety Decision Support ({allergyWarnings.length})
+                    </h3>
+                  </div>
+                  <span className="text-[11px] bg-red-100 text-red-900 font-semibold px-2 py-0.5 rounded">
+                    Safety Decision Support
+                  </span>
+                </div>
+
+                <div className="space-y-3">
+                  {allergyWarnings.map((aw) => (
+                    <div
+                      key={aw.id}
+                      className={`p-3.5 rounded-lg border space-y-2 ${
+                        aw.status === "ACKNOWLEDGED"
+                          ? "bg-slate-50 border-slate-200 opacity-75"
+                          : aw.severity === "CRITICAL"
+                          ? "bg-red-50/80 border-red-300"
+                          : "bg-amber-50/80 border-amber-300"
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-sm text-slate-900">
+                              {aw.medication_name}
+                            </span>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                              aw.warning_type === "CONFIRMED_ALLERGY_CONFLICT" ? "bg-red-100 text-red-800" :
+                              aw.warning_type === "POSSIBLE_ALLERGY_CONFLICT" ? "bg-amber-100 text-amber-800" :
+                              "bg-slate-200 text-slate-800"
+                            }`}>
+                              {aw.warning_type}
+                            </span>
+                            {aw.status === "ACKNOWLEDGED" && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
+                                ACKNOWLEDGED
+                              </span>
+                            )}
+                          </div>
+                          {aw.recorded_allergy && (
+                            <p className="text-xs text-red-800 font-semibold mt-1">
+                              Recorded Allergen: {aw.recorded_allergy} {aw.allergy_source ? `(${aw.allergy_source})` : ""}
+                            </p>
+                          )}
+                          <p className="text-xs text-slate-700 mt-1">
+                            {aw.explanation}
+                          </p>
+                          {aw.reviewer_decision && (
+                            <p className="text-[11px] text-emerald-800 font-medium mt-1">
+                              Clinician Justification: "{aw.reviewer_decision}" ({aw.reviewer_id})
+                            </p>
+                          )}
+                        </div>
+
+                        {aw.status !== "ACKNOWLEDGED" && (
+                          <button
+                            onClick={() => handleAcknowledgeAllergyWarning(aw.id)}
+                            disabled={saving || record.status === "Approved"}
+                            className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-semibold shrink-0 shadow-sm"
+                          >
+                            Acknowledge Warning
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded text-[11px] text-slate-600 space-y-0.5">
+                  <span className="font-semibold text-slate-700 block">Clinical Safety Notice:</span>
+                  <p>
+                    This is a clinical documentation and decision-support module, not an autonomous prescribing system. It does not recommend treatment, establish absolute drug safety, or block emergency administration. Missing allergy data is not treated as proof that the patient has no allergies.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Symptoms & Pertinent Negatives */}
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-3">
